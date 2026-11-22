@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
 
 if Path("/Users").exists():
     for d in [Path.cwd(), Path.cwd().parent, Path("/Users/takumi/Projects/meteo_lib")]:
@@ -98,7 +101,44 @@ def create_surface_figure(
     is_regional = (extent[1] - extent[0]) < 6.0
     station_min_dist = 0.20 if is_regional else 0.8
 
-    fig, ax, proj = setup_map_axis(extent, figsize=(11, 10), dpi=180)
+#    fig, ax, proj = setup_map_axis(extent, figsize=(11, 10), dpi=180)
+
+
+    # create_surface_figure 内の setup_map_axis の代わり
+    fig = plt.figure(figsize=(10, 9), dpi=150 if IS_LOCAL else 120)
+    proj = ccrs.PlateCarree()
+    ax = fig.add_subplot(1, 1, 1, projection=proj)
+    ax.set_extent(extent, crs=proj)
+
+    coast_res = "10m" if IS_LOCAL else "50m"
+    ax.add_feature(
+        cfeature.OCEAN.with_scale(coast_res),
+        facecolor="#ffffff",
+        edgecolor="none",
+        zorder=2,
+    )
+    ax.add_feature(
+        cfeature.COASTLINE.with_scale(coast_res),
+        edgecolor="#333333",
+        linewidth=0.9,
+        zorder=3,
+    )
+    ax.add_feature(
+        cfeature.BORDERS.with_scale(coast_res),
+        linestyle=":",
+        edgecolor="#666666",
+        zorder=3,
+    )
+    gl = ax.gridlines(
+        draw_labels=True,
+        dms=True,
+        x_inline=False,
+        y_inline=False,
+        alpha=0.3,
+        zorder=3,
+    )
+    gl.top_labels = False
+    gl.right_labels = False
 
     has_amedas = amedas_dir.exists()
     df_amedas = (
