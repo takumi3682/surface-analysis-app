@@ -1,0 +1,239 @@
+from datetime import datetime, time
+import io
+import os
+from pathlib import Path
+import sys
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# ローカル環境用のパス解決（Cloudでは requirements.txt の meteo_lib を使用）
+if Path("/Users").exists():
+    for d in [Path.cwd(), Path.cwd().parent, Path("/Users/takumi/Projects/meteo_lib")]:
+        if d.exists() and str(d.resolve()) not in sys.path:
+            sys.path.append(str(d.resolve()))
+
+from meteo_lib.obs_utils import get_synop_metar_combined
+from meteo_lib.plot_utils import (
+    plot_amedas_barbs_and_obs,
+    plot_amedas_temp_shade,
+    plot_msm_isobars,
+    plot_synop_metar_station,
+    setup_map_axis,
+)
+from meteo_lib.surface_utils import (
+    REGION_EN,
+    REGION_EXTENTS,
+    get_msm_surface,
+    load_amedas_parquet,
+)
+
+st.set_page_config(
+    page_title="地上天気図解析 (Surface Analysis)",
+    layout="wide",
+)
+
+IS_LOCAL = Path("/Users").exists()
+DEFAULT_AMEDAS_DIR = Path("/Users/takumi/Projects/analysis-Meteo/data/amedas_parquet")
+
+# 環境に応じたキャッシュ・一時ディレクトリの切り替え
+CACHE_SURF_DIR = (
+    "/Users/takumi/Projects/cache/surface" if IS_LOCAL else "/tmp/meteo_cache/surface"
+)
+RAW_GRIB_DIR = (
+    "/Users/takumi/Projects/raw_grib" if IS_LOCAL else "/tmp/meteo_raw_grib"
+)
+
+
+# --- キャッシュ付きデータ取得ラッパー ---
+@st.cache_data(ttl=3600, show_spinner="MSM 地上データを取得・解析中...")
+def cached_get_msm(dt_str: str, extent_tuple: tuple):
+    ds = get_msm_surface(
+        dt_str,
+        extent=extent_tuple,
+        cache_dir=CACHE_SURF_DIR,
+        raw_dir=RAW_GRIB_DIR,
+    )
+    # Cloud環境ではディスク節約のためGRIB2生データを削除
+    if not IS_LOCAL and Path(RAW_GRIB_DIR).exists():
+        for f in Path(RAW_GRIB_DIR).glob(f"*{dt_str}*"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    # xarrayの遅延読み込みを解除して安全にキャッシュ化
+    return ds.load() if ds is not None else None
+
+
+@st.cache_data(ttl=1800, show_spinner="SYNOP / METAR データを取得中...")
+def cached_get_obs(target_iso: str, extent_tuple: tuple, min_dist: float):
+    dt_utc = pd.to_datetime(target_iso, utc=True)
+    return get_synop_metar_combined(
+        dt_utc, list(extent_tuple), min_distance_deg=min_dist
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner="アメダスデータを読み込み中...")
+def cached_load_amedas(base_dir_str: str, target_iso: str, extent_tuple: tuple):
+    dt_utc = pd.to_datetime(target_iso, utc=True)
+    return load_amedas_parquet(base_dir_str, dt_utc, list(extent_tuple))
+
+
+# --- 描画関数 ---
+def create_surface_figure(
+    target_dt: pd.Timestamp,
+    region: str,
+    amedas_dir: Path,
+    show_isobars: bool,
+    show_amedas_temp_shade: bool,
+    show_amedas_obs: bool,
+    show_amedas_wind: bool,
+    show_synop_metar: bool,
+    show_station_name: bool,
+    msm_sigma: float,
+    temp_sigma: float,
+):
+    dt_str = target_dt.strftime("%Y%m%d%H")
+    target_iso = target_dt.isoformat()
+    extent = REGION_EXTENTS.get(region, REGION_EXTENTS["関東"])
+    extent_tuple = tuple(extent)
+
+    is_regional = (extent[1] - extent[0]) < 6.0
+    station_min_dist = 0.20 if is_regional else 0.8
+
+    fig, ax, proj = setup_map_axis(extent, figsize=(11, 10), dpi=180)
+
+    has_amedas = amedas_dir.exists()
+    df_amedas = (
+        cached_load_amedas(str(amedas_dir), target_iso, extent_tuple)
+        if has_amedas
+        else pd.DataFrame()
+    )
+
+    if show_amedas_temp_shade and not df_amedas.empty:
+        plot_amedas_temp_shade(
+            ax, proj, df_amedas, extent, is_regional, sigma=temp_sigma
+        )
+
+    if show_isobars:
+        ds_msm = cached_get_msm(dt_str, extent_tuple)
+        plot_msm_isobars(ax, proj, ds_msm, is_regional, sigma=msm_sigma)
+
+    sub_obs = (
+        cached_get_obs(target_iso, extent_tuple, station_min_dist)
+        if show_synop_metar
+        else pd.DataFrame()
+    )
+
+    df_amedas_plot = df_amedas.copy()
+    if not df_amedas_plot.empty and not sub_obs.empty:
+        excl_deg = 0.12 if is_regional else 0.30
+        keep_mask = [
+            np.hypot(sub_obs["lat"] - row["lat"], sub_obs["lon"] - row["lon"]).min()
+            >= excl_deg
+            for _, row in df_amedas_plot.iterrows()
+        ]
+        df_amedas_plot = df_amedas_plot[keep_mask]
+
+    if not df_amedas_plot.empty:
+        plot_amedas_barbs_and_obs(
+            ax,
+            proj,
+            df_amedas_plot,
+            is_regional,
+            show_wind=show_amedas_wind,
+            show_obs=show_amedas_obs,
+        )
+
+    if not sub_obs.empty:
+        plot_synop_metar_station(
+            ax, proj, sub_obs, show_station_name=show_station_name
+        )
+
+    reg_en = REGION_EN.get(region, region)
+    utc_str = target_dt.strftime("%Y-%m-%d %H:%M UTC")
+    jst_str = target_dt.tz_convert("Asia/Tokyo").strftime("%Y-%m-%d %H:%M JST")
+    ax.set_title(
+        f"Surface Analysis ({reg_en} / MSM MSLP + AMeDAS + SYNOP/METAR)\nValid: {utc_str} / {jst_str}",
+        fontsize=11,
+        pad=10,
+        fontweight="semibold",
+    )
+    plt.tight_layout()
+    return fig
+
+
+# --- サイドバー UI ---
+st.sidebar.header("解析条件設定")
+
+sel_date = st.sidebar.date_input("対象日 (UTC)", value=datetime(2026, 8, 30).date())
+sel_hour = st.sidebar.radio(
+    "対象時刻 (UTC)",
+    options=[0, 3, 6, 9, 12, 15, 18, 21],
+    index=4,
+    horizontal=True,
+    format_func=lambda h: f"{h:02d}Z",
+)
+
+target_dt = pd.Timestamp(datetime.combine(sel_date, time(sel_hour, 0)), tz="UTC")
+st.sidebar.caption(
+    f"日本時間: **{target_dt.tz_convert('Asia/Tokyo').strftime('%Y-%m-%d %H:%M JST')}**"
+)
+
+region_options = list(REGION_EXTENTS.keys())
+default_idx = region_options.index("東北") if "東北" in region_options else 0
+sel_region = st.sidebar.selectbox("表示領域", options=region_options, index=default_idx)
+
+st.sidebar.subheader("表示レイヤー")
+show_isobars = st.sidebar.checkbox("MSM 海面更正気圧 (等圧線)", value=True)
+show_synop_metar = st.sidebar.checkbox("SYNOP / METAR 国際式プロット", value=True)
+show_station_name = st.sidebar.checkbox(
+    "SYNOP / METAR 地点名を表示", value=False, disabled=not show_synop_metar
+)
+
+amedas_available = DEFAULT_AMEDAS_DIR.exists()
+show_amedas_temp_shade = st.sidebar.checkbox(
+    "アメダス 気温カラーシェード", value=amedas_available, disabled=not amedas_available
+)
+show_amedas_obs = st.sidebar.checkbox(
+    "アメダス 気温値・降水マーカー", value=amedas_available, disabled=not amedas_available
+)
+show_amedas_wind = st.sidebar.checkbox(
+    "アメダス 風矢羽", value=amedas_available, disabled=not amedas_available
+)
+if not amedas_available:
+    st.sidebar.info("Cloud環境（ローカルParquetなし）のため、MSMとSYNOP/METARを描画します。")
+
+with st.sidebar.expander("平滑化・詳細パラメータ"):
+    msm_sigma = st.slider("MSM 等圧線スムージング (sigma)", 0.0, 3.0, 1.0, 0.2)
+    temp_sigma = st.slider("アメダス気温スムージング (sigma)", 0.0, 3.0, 1.2, 0.2)
+
+# --- メイン描画エリア ---
+fig = create_surface_figure(
+    target_dt=target_dt,
+    region=sel_region,
+    amedas_dir=DEFAULT_AMEDAS_DIR,
+    show_isobars=show_isobars,
+    show_amedas_temp_shade=show_amedas_temp_shade,
+    show_amedas_obs=show_amedas_obs,
+    show_amedas_wind=show_amedas_wind,
+    show_synop_metar=show_synop_metar,
+    show_station_name=show_station_name,
+    msm_sigma=msm_sigma,
+    temp_sigma=temp_sigma,
+)
+
+st.pyplot(fig, use_container_width=True)
+
+buf = io.BytesIO()
+fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+plt.close(fig)
+
+fname = f"surface_analysis_{sel_region}_{target_dt.strftime('%Y%m%d%H')}.png"
+st.download_button(
+    label="PNG画像をダウンロード",
+    data=buf.getvalue(),
+    file_name=fname,
+    mime="image/png",
+)

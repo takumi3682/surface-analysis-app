@@ -1,0 +1,14 @@
+streamlit
+pandas
+numpy
+xarray
+cfgrib
+netCDF4
+cartopy
+metpy
+scipy
+matplotlib
+japanize-matplotlib
+requests
+Pillow
+git+https://github.com/takumi3682/meteo_lib.git

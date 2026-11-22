@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+
+# 気象データ・キャッシュ・出力画像
+raw_grib/
+cache/
+data/
+*.grib2
+*.bin
+*.nc
+*.parquet
+*.png
