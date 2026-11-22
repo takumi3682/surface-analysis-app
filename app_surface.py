@@ -332,18 +332,31 @@ show_station_name = st.sidebar.checkbox(
     "SYNOP / METAR 地点名を表示", value=False, disabled=not show_synop_metar
 )
 
-amedas_available = DEFAULT_AMEDAS_DIR.exists()
+is_within_48h = (
+    0 <= (pd.Timestamp.now(tz="UTC") - target_dt).total_seconds() <= 47 * 3600
+)
+can_use_amedas = DEFAULT_AMEDAS_DIR.exists() or is_within_48h
+
 show_amedas_temp_shade = st.sidebar.checkbox(
-    "アメダス 気温カラーシェード", value=amedas_available, disabled=not amedas_available
+    "アメダス 気温カラーシェード",
+    value=can_use_amedas,
+    disabled=not can_use_amedas,
+    key=f"chk_amedas_shade_{can_use_amedas}",
 )
 show_amedas_obs = st.sidebar.checkbox(
-    "アメダス 気温値・降水マーカー", value=amedas_available, disabled=not amedas_available
+    "アメダス 気温値・降水マーカー",
+    value=can_use_amedas,
+    disabled=not can_use_amedas,
+    key=f"chk_amedas_obs_{can_use_amedas}",
 )
 show_amedas_wind = st.sidebar.checkbox(
-    "アメダス 風矢羽", value=amedas_available, disabled=not amedas_available
+    "アメダス 風矢羽",
+    value=can_use_amedas,
+    disabled=not can_use_amedas,
+    key=f"chk_amedas_wind_{can_use_amedas}",
 )
-if not amedas_available:
-    st.sidebar.info("Cloud環境（ローカルParquetなし）のため、MSMとSYNOP/METARを描画します。")
+if not can_use_amedas:
+    st.sidebar.info("指定時刻は気象庁APIの保持期限（48時間）外のため、MSMとSYNOP/METARのみ描画します。")
 
 # 気温カラー設定（対象月に応じてデフォルトレンジを自動調整）
 with st.sidebar.expander("気温カラー設定", expanded=True):
