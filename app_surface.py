@@ -5,6 +5,7 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -141,11 +142,11 @@ def create_surface_figure(
     gl.right_labels = False
 
     has_amedas = amedas_dir.exists()
-    df_amedas = (
-        cached_load_amedas(str(amedas_dir), target_iso, extent_tuple)
-        if has_amedas
-        else pd.DataFrame()
-    )
+    # アメダスデータ取得（ローカルParquet優先、なければ気象庁APIへ自動フォールバック）
+    if amedas_dir.exists():
+        df_amedas = cached_load_amedas(str(amedas_dir), target_iso, extent_tuple)
+    else:
+        df_amedas = cached_load_amedas_jma_api(target_iso, extent_tuple)
 
     if show_amedas_temp_shade and not df_amedas.empty:
         plot_amedas_temp_shade(
@@ -316,3 +317,89 @@ st.download_button(
     file_name=fname,
     mime="image/png",
 )
+
+# --- 気象庁防災情報 JSON からアメダスデータを取得（直近48時間用） ---
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_jma_amedas_table() -> pd.DataFrame:
+    """気象庁の観測所マスタ (amedastable.json) を取得"""
+    url = "https://www.jma.go.jp/bosai/amedas/const/amedastable.json"
+    res = requests.get(url, timeout=10)
+    res.raise_for_status()
+    raw = res.json()
+    records = []
+    for stn_id, info in raw.items():
+        lat = info["lat"][0] + info["lat"][1] / 60.0
+        lon = info["lon"][0] + info["lon"][1] / 60.0
+        records.append({"stn_id": stn_id, "lat": lat, "lon": lon})
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=1800, show_spinner="気象庁APIからアメダス実況を取得中...")
+def cached_load_amedas_jma_api(target_iso: str, extent_tuple: tuple) -> pd.DataFrame:
+    """直近48時間以内であれば気象庁防災情報JSONからアメダス実況を取得"""
+    dt_utc = pd.to_datetime(target_iso, utc=True)
+    now_utc = pd.Timestamp.now(tz="UTC")
+
+    # 保持期限（約48時間）を超えている場合は空を返す
+    if (now_utc - dt_utc).total_seconds() > 47 * 3600 or dt_utc > now_utc:
+        return pd.DataFrame()
+
+    dt_jst = dt_utc.tz_convert("Asia/Tokyo")
+    ts_str = dt_jst.strftime("%Y%m%d%H0000")
+    url = f"https://www.jma.go.jp/bosai/amedas/data/map/{ts_str}.json"
+
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return pd.DataFrame()
+        obs_map = res.json()
+        df_table = fetch_jma_amedas_table()
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    # 気象庁16方位（1:NNE 〜 16:N, 0:静穏）を数学角・風向(度)へ変換
+    for _, stn in df_table.iterrows():
+        sid = stn["stn_id"]
+        if sid not in obs_map:
+            continue
+        d = obs_map[sid]
+
+        # [値, 品質フラグ] の形式（フラグ 0 が正常値）
+        temp = d["temp"][0] if ("temp" in d and d["temp"][1] == 0) else np.nan
+        prec = d["precipitation1h"][0] if ("precipitation1h" in d and d["precipitation1h"][1] == 0) else 0.0
+        wspd = d["wind"][0] if ("wind" in d and d["wind"][1] == 0) else np.nan
+        wdir16 = d["windDirection"][0] if ("windDirection" in d and d["windDirection"][1] == 0) else 0
+
+        if np.isfinite(wspd) and wdir16 > 0:
+            deg = wdir16 * 22.5
+            rad = np.deg2rad(deg)
+            u = -wspd * np.sin(rad)
+            v = -wspd * np.cos(rad)
+        elif np.isfinite(wspd) and wdir16 == 0:
+            u, v = 0.0, 0.0
+        else:
+            u, v = np.nan, np.nan
+
+        rows.append({
+            "lat": stn["lat"],
+            "lon": stn["lon"],
+            "temp_val_safe": float(temp) if temp is not None else np.nan,
+            "prec_val_safe": float(prec) if prec is not None else 0.0,
+            "wspd_safe": float(wspd) if wspd is not None else np.nan,
+            "wind_u_safe": float(u),
+            "wind_v_safe": float(v),
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    lon_min, lon_max, lat_min, lat_max = extent_tuple
+    mask = (
+        (df["lon"] >= lon_min)
+        & (df["lon"] <= lon_max)
+        & (df["lat"] >= lat_min)
+        & (df["lat"] <= lat_max)
+    )
+    return df[mask].reset_index(drop=True)
