@@ -1,3 +1,4 @@
+setuptools
 streamlit
 pandas
 numpy
@@ -7,9 +8,8 @@ netCDF4
 cartopy
 metpy
 scipy
-matplotlib
+matplotlib<3.11
 japanize-matplotlib
 requests
 Pillow
-setuptools
 git+https://github.com/takumi3682/meteo_lib.git
